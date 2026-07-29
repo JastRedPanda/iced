@@ -50,6 +50,114 @@ impl From<Error> for graphics::Error {
     }
 }
 
+/// WMDE: reports why software adapters are allowed for this process, if they are.
+///
+/// `WMDE_ALLOW_SOFTWARE_GPU=1` restores the stock upstream behaviour, for
+/// debugging or for a machine where software `wgpu` really is the better option.
+///
+/// `WGPU_ADAPTER_NAME` deliberately does *not* appear here. The branch that
+/// honours it matches on the adapter name alone and never consults this filter,
+/// so an explicitly named software adapter is already returned untouched. Making
+/// it a process-wide exemption would only have switched the filter off in the
+/// paths where the named adapter was *not* found - exactly where the guard is
+/// still wanted.
+fn software_adapters_allowed() -> Option<&'static str> {
+    // WMDE: parse leniently. This is the one knob a user reaches for when their
+    // desktop has unexpectedly dropped to tiny-skia, usually through a systemd
+    // `Environment=` line, so `TRUE`, `yes`, `on` and stray whitespace all have
+    // to work. An unrecognised value is a typo worth reporting, not a silent no.
+    match std::env::var("WMDE_ALLOW_SOFTWARE_GPU") {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => {
+                return Some("WMDE_ALLOW_SOFTWARE_GPU is set");
+            }
+            "" | "0" | "false" | "no" | "off" => {}
+            _ => log::warn!(
+                "WMDE: ignoring WMDE_ALLOW_SOFTWARE_GPU={value:?}, \
+                 expected one of 1/true/yes/on or 0/false/no/off"
+            ),
+        },
+        Err(_) => {}
+    }
+
+    None
+}
+
+/// WMDE: `true` when the adapter name marks a Mesa/ANGLE software rasteriser.
+///
+/// Backstop for the GLES backend, which infers the device type from the
+/// `GL_RENDERER` string against a fixed list (`llvmpipe`, `swiftshader`,
+/// `mesa offscreen`) and reports anything else as `DeviceType::Other`. Mesa's
+/// `softpipe` and `lavapipe` are not on that list, so without this check
+/// `GALLIUM_DRIVER=softpipe` would keep the expensive wgpu software path.
+fn name_marks_software_renderer(name: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "llvmpipe",
+        "lavapipe",
+        "softpipe",
+        "swiftshader",
+        "mesa offscreen",
+    ];
+
+    let name = name.to_ascii_lowercase();
+
+    MARKERS.iter().any(|marker| name.contains(marker))
+}
+
+/// WMDE: `true` when this adapter is a pure software renderer we refuse to use.
+///
+/// `wgpu::Instance::request_adapter` does not exclude software adapters, it only
+/// sorts them last, so on a machine whose only adapter is llvmpipe / lavapipe /
+/// SwiftShader it hands one back as if it were hardware. `iced_renderer::fallback`
+/// only reaches for tiny-skia when the `wgpu` compositor returns an error, so an
+/// accepted software adapter means silently rendering in software *through* wgpu:
+/// measured at ~145 MB PSS on a GPU-less VM against ~28 MB for tiny-skia.
+///
+/// `DeviceType::Cpu` is authoritative and is always rejected: the Vulkan backend
+/// copies it straight from `VkPhysicalDeviceProperties::deviceType` (lavapipe and
+/// SwiftShader declare themselves `CPU`), and the GLES backend sets it from the
+/// well-known renderer strings `llvmpipe`, `swiftshader` and `mesa offscreen`.
+///
+/// `DeviceType::Other` is the "unknown, most likely real hardware" bucket of both
+/// backends, so it is accepted unless the adapter *name* gives the software
+/// rasteriser away - see [`name_marks_software_renderer`]. Every other device
+/// type is left alone.
+///
+/// Every decision is logged so it can be diagnosed from the journal.
+pub(crate) fn is_rejected_software_adapter(adapter: &wgpu::Adapter) -> bool {
+    let info = adapter.get_info();
+
+    let is_software = info.device_type == wgpu::DeviceType::Cpu
+        || (info.device_type == wgpu::DeviceType::Other
+            && name_marks_software_renderer(&info.name));
+
+    if !is_software {
+        return false;
+    }
+
+    if let Some(reason) = software_adapters_allowed() {
+        log::info!(
+            "WMDE: accepting software adapter {:?} ({:?}, {:?}) because {reason}",
+            info.name,
+            info.backend,
+            info.driver
+        );
+
+        return false;
+    }
+
+    log::warn!(
+        "WMDE: rejecting software adapter {:?} ({:?}, {:?}); \
+         falling back to the tiny-skia renderer. \
+         Set WMDE_ALLOW_SOFTWARE_GPU=1 to use it anyway.",
+        info.name,
+        info.backend,
+        info.driver
+    );
+
+    true
+}
+
 impl Compositor {
     /// Requests a new [`Compositor`] with the given [`Settings`].
     ///
@@ -142,6 +250,10 @@ impl Compositor {
                         info.device == device_id as u32
                             && info.vendor == vendor_id as u32
                     })
+                    // WMDE: the render node the compositor reports can resolve to
+                    // a software adapter (the desktop compositor itself may be
+                    // running on llvmpipe); drop it instead of using it blindly.
+                    .filter(|adapter| !is_rejected_software_adapter(adapter))
                     .find(|adapter| {
                         if let Some(surface) = compatible_surface.as_ref() {
                             adapter.is_surface_supported(surface)
@@ -168,6 +280,15 @@ impl Compositor {
                 });
         } else {
             adapter = instance.request_adapter(&adapter_options).await.ok();
+
+            // WMDE: `request_adapter` only ranks software adapters last, it never
+            // excludes them, so an all-software machine gets one back here. Drop
+            // it and let the GL retry below have a go at finding real hardware;
+            // if that fails too, the compositor errors out and iced falls back to
+            // tiny-skia.
+            if adapter.as_ref().is_some_and(is_rejected_software_adapter) {
+                adapter = None;
+            }
         }
 
         let adapter = match adapter {
@@ -194,9 +315,30 @@ impl Compositor {
                     compatible_surface: compatible_surface.as_ref(),
                     force_fallback_adapter: false,
                 };
-                instance.request_adapter(&adapter_options).await.map_err(
-                    |_| Error::NoAdapterFound(format!("{:?}", adapter_options)),
-                )?
+                let adapter = instance
+                    .request_adapter(&adapter_options)
+                    .await
+                    .map_err(|_| {
+                        Error::NoAdapterFound(format!("{:?}", adapter_options))
+                    })?;
+
+                // WMDE: last stage, and the one most likely to surface a software
+                // adapter because it enables the GL backend where Mesa's llvmpipe
+                // driver is almost always present. Returning an error here is the
+                // whole point: `iced_renderer::fallback` only tries tiny-skia when
+                // the wgpu compositor fails, so we must not hand back a software
+                // adapter that merely pretends to be hardware.
+                if is_rejected_software_adapter(&adapter) {
+                    return Err(Error::NoAdapterFound(format!(
+                        "only the software adapter {:?} was available; \
+                         set WMDE_ALLOW_SOFTWARE_GPU=1 to use it anyway \
+                         ({:?})",
+                        adapter.get_info().name,
+                        adapter_options
+                    )));
+                }
+
+                adapter
             }
         };
         log::info!("Selected: {:#?}", adapter.get_info());

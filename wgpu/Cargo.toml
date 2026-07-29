@@ -18,7 +18,34 @@ rustdoc-args = ["--cfg", "docsrs"]
 all-features = true
 
 [features]
-default = ["wgpu/default"]
+# WMDE: WMDE is a Linux/Wayland-only desktop, so Vulkan is the only backend
+# requested. This is the single place in the whole graph (libcosmic -> iced ->
+# iced_renderer -> iced_wgpu) that names `wgpu/default`, which is what drags in
+# dx12/metal/webgpu/gles; `std` and `wgsl` keep arriving through the workspace
+# dependency declaration in iced/Cargo.toml, giving a final set of exactly
+# ["std", "wgsl", "vulkan"].
+#
+# GL is deliberately absent, and that is the point rather than a side effect.
+# There is no way to tell a hardware GL driver from Mesa's llvmpipe without
+# loading Mesa and asking it, and a `/dev/dri/renderD*` node proves nothing (the
+# GPU-less test VM has one, served by llvmpipe). Measured on that VM with GL
+# still compiled in: the probe alone cost 27 MB of resident libLLVM/libEGL that
+# is never unloaded, and pushed peak RSS to 200 MB against 48 MB for a plain
+# tiny-skia start. Without the GL backend there is nothing to probe, so a machine
+# with no Vulkan driver falls straight through to tiny-skia and never maps Mesa.
+#
+# The trade is that hardware old enough to have GL but no Vulkan (roughly
+# pre-2014 Intel, pre-GCN AMD, nouveau before Turing) renders on the CPU. That is
+# an accepted trade: on that class of hardware tiny-skia is likely faster than the
+# aging GL driver anyway.
+#
+# Note this also drops wgpu's `parking_lot` feature. That does NOT touch
+# wgpu-core, which depends on parking_lot unconditionally; it only switches the
+# `Mutex` of the wgpu facade itself (src/util/mutex.rs, used by api/buffer.rs,
+# api/surface.rs, api/device.rs and backend/wgpu_core.rs) over to the std
+# primitives. A build for Windows/macOS/wasm would have to add dx12/metal back
+# here - it would still compile, but would find no adapter at runtime.
+default = ["wgpu/vulkan"]
 geometry = ["iced_graphics/geometry", "lyon"]
 image = ["iced_graphics/image"]
 svg = ["iced_graphics/svg", "resvg/text"]

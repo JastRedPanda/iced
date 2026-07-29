@@ -992,6 +992,14 @@ impl renderer::Headless for Renderer {
             .await
             .ok()?;
 
+        // WMDE: same story as in the windowed compositor - `request_adapter`
+        // deprioritizes software adapters but never excludes them. Returning
+        // `None` is the honest "wgpu is not available" answer and lets the caller
+        // pick another renderer.
+        if window::compositor::is_rejected_software_adapter(&adapter) {
+            return None;
+        }
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("iced_wgpu [headless]"),
