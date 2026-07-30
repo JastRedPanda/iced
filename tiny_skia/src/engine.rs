@@ -38,6 +38,16 @@ impl Engine {
         clip_mask: &mut tiny_skia::Mask,
         clip_bounds: Rectangle,
     ) {
+        // WMDE: honour `Quad::snap`. Only the wgpu backend used to implement it, in the
+        // quad shader, so on any machine that falls back to this backend every snapped
+        // fill in the interface silently stopped snapping and thin seams came back
+        // between abutting surfaces. Shadowing the argument keeps the rest of the
+        // function - path, border, shadow - working off one set of bounds.
+        let quad = &Quad {
+            bounds: snap_to_pixel_grid(quad.bounds, transformation, quad.snap),
+            ..*quad
+        };
+
         let physical_bounds = quad.bounds * transformation;
 
         if !clip_bounds.intersects(&physical_bounds) {
@@ -669,6 +679,44 @@ impl Engine {
 pub fn into_color(color: Color) -> tiny_skia::Color {
     tiny_skia::Color::from_rgba(color.b, color.g, color.r, color.a)
         .expect("Convert color from iced to tiny_skia")
+}
+
+/// WMDE: round `bounds` so that it covers whole physical pixels, the software
+/// counterpart of what the wgpu quad shader does for `Quad::snap`.
+///
+/// A fill whose edge lands mid-pixel covers that row or column only partly. Where
+/// two surfaces meet - a menu strip over a window body, a 1px rule, a terminal cell
+/// against its neighbour - the shared line ends up a blend of both, or of neither if
+/// nothing opaque sits behind, which reads as a hairline seam.
+///
+/// Both corners are rounded independently rather than rounding the position and
+/// keeping the size, so the far edge lands on the grid too; a rounded size over an
+/// unrounded position would just move the seam. The 0.001 nudge matches
+/// `wgpu/src/shader/quad/{solid,gradient}.wgsl` so the two backends break ties the
+/// same way and a value sitting exactly on .5 does not alternate between them.
+///
+/// Snapping happens in physical space and the result is mapped back, because the
+/// caller builds its path in logical coordinates and lets tiny-skia apply the
+/// transformation.
+fn snap_to_pixel_grid(
+    bounds: Rectangle,
+    transformation: Transformation,
+    snap: bool,
+) -> Rectangle {
+    if !snap {
+        return bounds;
+    }
+
+    let physical = bounds * transformation;
+    let left = (physical.x + 0.001).round();
+    let top = (physical.y + 0.001).round();
+
+    Rectangle {
+        x: left,
+        y: top,
+        width: (physical.x + physical.width + 0.001).round() - left,
+        height: (physical.y + physical.height + 0.001).round() - top,
+    } * transformation.inverse()
 }
 
 fn into_transform(transformation: Transformation) -> tiny_skia::Transform {
