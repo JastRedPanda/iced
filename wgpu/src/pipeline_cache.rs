@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 pub struct Cache {
     raw: wgpu::PipelineCache,
     path: PathBuf,
+    /// What was on disk when this was loaded, so an unchanged cache is not rewritten.
+    loaded: Option<Vec<u8>>,
 }
 
 impl Cache {
@@ -38,6 +40,13 @@ impl Cache {
         let Some(data) = self.raw.get_data() else {
             return;
         };
+
+        // Every application in the session builds the same pipelines from the same blob, so
+        // after the first run there is usually nothing new to record. Writing anyway would
+        // have a dozen processes rewriting an identical file at every login.
+        if self.loaded.as_deref() == Some(data.as_slice()) {
+            return;
+        }
 
         if let Err(error) = write_atomically(&self.path, &data) {
             // A cache that cannot be written is a slow start, not a broken one.
@@ -86,7 +95,11 @@ pub fn load(device: &wgpu::Device, adapter: &wgpu::Adapter) -> Option<Cache> {
         })
     };
 
-    Some(Cache { raw, path })
+    Some(Cache {
+        raw,
+        path,
+        loaded: data,
+    })
 }
 
 /// Where this adapter's blob lives.
