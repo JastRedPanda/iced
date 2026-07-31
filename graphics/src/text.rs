@@ -2,7 +2,6 @@
 pub mod cache;
 pub mod editor;
 pub mod paragraph;
-pub mod system_fonts;
 
 pub use cache::Cache;
 pub use editor::Editor;
@@ -133,11 +132,8 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
     static FONT_SYSTEM: OnceLock<RwLock<FontSystem>> = OnceLock::new();
 
     FONT_SYSTEM.get_or_init(|| {
-        // WMDE: system_fonts::font_system replaces cosmic_text::FontSystem::new_with_fonts.
-        // Same result, same defaults, same locale - it only parses the installed fonts on
-        // every core instead of one. That scan is the most expensive single step of start-up.
         RwLock::new(FontSystem {
-            raw: system_fonts::font_system([
+            raw: cosmic_text::FontSystem::new_with_fonts([
                 cosmic_text::fontdb::Source::Binary(Arc::new(
                     include_bytes!("../fonts/Iced-Icons.ttf").as_slice(),
                 )),

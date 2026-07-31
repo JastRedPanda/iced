@@ -35,9 +35,6 @@ half.workspace = true
 log.workspace = true
 raw-window-handle.workspace = true
 rustc-hash.workspace = true
-# WMDE: text::system_fonts picks the locale the way cosmic-text would have picked it.
-# Already in the graph - cosmic-text depends on it - so this costs no extra compilation.
-sys-locale.workspace = true
 thiserror.workspace = true
 unicode-segmentation.workspace = true
 
@@ -50,8 +47,3 @@ kamadak-exif.optional = true
 lyon_path.workspace = true
 lyon_path.optional = true
 
-# WMDE: text::system_fonts repeats fontdb's fontconfig directory discovery so the parallel
-# font scan sees exactly the files fontdb would have seen. Same crate fontdb itself uses,
-# and gated to the same targets as the code that calls it.
-[target.'cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))'.dependencies]
-fontconfig-parser.workspace = true

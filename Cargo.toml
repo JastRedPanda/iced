@@ -245,10 +245,6 @@ bytes = "1.6"
 cosmic-text = "0.19"
 cryoglyph = { git = "https://github.com/iced-rs/cryoglyph.git", rev = "e429a025df36ab8145708acb309080ae3deec17a" }
 dark-light = "1.0"
-# WMDE: both already resolve in the graph via cosmic-text/fontdb; iced_graphics uses them
-# directly in text::system_fonts. Versions pinned to what fontdb 0.23 already pulls.
-fontconfig-parser = "0.5"
-sys-locale = "0.3"
 resvg = "0.45"
 web-sys = "0.3.69"
 guillotiere = "0.6"
