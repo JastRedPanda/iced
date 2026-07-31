@@ -150,9 +150,17 @@ fn fontconfig_dirs(home: &Result<String, std::env::VarError>) -> Option<Vec<Path
         fontconfig
             .dirs
             .into_iter()
-            .filter_map(|dir| match dir.path.strip_prefix("~") {
-                Some(rest) => home.as_ref().ok().map(|h| Path::new(h).join(rest)),
-                None => Some(dir.path),
+            .filter_map(|dir| {
+                // Path::strip_prefix compares components and reports a Result, unlike the
+                // str method of the same name. Leaving the path alone first also keeps the
+                // borrow out of the way of moving it.
+                if !dir.path.starts_with("~") {
+                    return Some(dir.path);
+                }
+
+                let rest = dir.path.strip_prefix("~").ok()?.to_path_buf();
+
+                home.as_ref().ok().map(|h| Path::new(h).join(rest))
             })
             .collect(),
     )
