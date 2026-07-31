@@ -53,8 +53,17 @@ impl Cache {
 
         // TODO: Reuse `cosmic-text` font database
         if self.fontdb.is_none() {
+            // WMDE: this is a SECOND full scan of every installed font, on top of the one
+            // cosmic-text already did. The tiny_skia twin of this file clones the existing
+            // database instead. Logged because it is expensive and easy to miss.
+            let started = std::time::Instant::now();
             let mut fontdb = usvg::fontdb::Database::new();
             fontdb.load_system_fonts();
+            log::debug!(
+                "wgpu svg: built a SECOND font database, {} faces in {}ms",
+                fontdb.len(),
+                started.elapsed().as_millis()
+            );
 
             self.fontdb = Some(Arc::new(fontdb));
         }

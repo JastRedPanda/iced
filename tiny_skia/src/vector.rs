@@ -96,8 +96,14 @@ impl Cache {
         let version = font_system.version();
 
         if self.fontdb_version != Some(version) {
+            let started = std::time::Instant::now();
             self.fontdb = Some(Arc::new(font_system.db().clone()));
             self.fontdb_version = Some(version);
+            log::debug!(
+                "tiny_skia svg: cloned the font database, {} faces in {}ms",
+                self.fontdb.as_ref().map_or(0, |db| db.len()),
+                started.elapsed().as_millis()
+            );
         }
 
         let options = usvg::Options {
