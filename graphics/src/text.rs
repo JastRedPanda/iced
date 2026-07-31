@@ -165,7 +165,11 @@ pub fn prewarm_font_system() {
     let _ = std::thread::Builder::new()
         .name("iced-font-scan".to_owned())
         .spawn(|| {
-            let _ = font_system().read();
+            // Taking the lock is the whole point: the `OnceLock` initialiser runs on first
+            // access, and this thread exists only to be the one that pays for it. Dropped
+            // straight away on purpose - `let _` on a guard is denied by let_underscore_lock,
+            // and it would read as an accident here rather than the intent.
+            drop(font_system().read());
         });
 }
 
