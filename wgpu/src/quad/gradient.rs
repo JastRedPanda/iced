@@ -69,6 +69,7 @@ impl Pipeline {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         constants_layout: &wgpu::BindGroupLayout,
+        cache: Option<&wgpu::PipelineCache>,
     ) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -156,7 +157,7 @@ impl Pipeline {
                         alpha_to_coverage_enabled: false,
                     },
                     multiview_mask: None,
-                    cache: None,
+                    cache,
                 },
             );
 

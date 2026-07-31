@@ -277,11 +277,18 @@ impl Pipeline {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         antialiasing: Option<Antialiasing>,
+        cache: Option<&wgpu::PipelineCache>,
     ) -> Pipeline {
         Pipeline {
-            msaa: antialiasing.map(|a| msaa::Pipeline::new(device, format, a)),
-            solid: solid::Pipeline::new(device, format, antialiasing),
-            gradient: gradient::Pipeline::new(device, format, antialiasing),
+            msaa: antialiasing
+                .map(|a| msaa::Pipeline::new(device, format, a, cache)),
+            solid: solid::Pipeline::new(device, format, antialiasing, cache),
+            gradient: gradient::Pipeline::new(
+                device,
+                format,
+                antialiasing,
+                cache,
+            ),
         }
     }
 }
@@ -712,6 +719,7 @@ mod solid {
             device: &wgpu::Device,
             format: wgpu::TextureFormat,
             antialiasing: Option<Antialiasing>,
+            cache: Option<&wgpu::PipelineCache>,
         ) -> Self {
             let constants_layout = device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
@@ -778,7 +786,7 @@ mod solid {
                         depth_stencil: None,
                         multisample: triangle::multisample_state(antialiasing),
                         multiview_mask: None,
-                        cache: None,
+                        cache,
                     },
                 );
 
@@ -865,6 +873,7 @@ mod gradient {
             device: &wgpu::Device,
             format: wgpu::TextureFormat,
             antialiasing: Option<Antialiasing>,
+            cache: Option<&wgpu::PipelineCache>,
         ) -> Self {
             let constants_layout = device.create_bind_group_layout(
                 &wgpu::BindGroupLayoutDescriptor {
@@ -943,7 +952,7 @@ mod gradient {
                     depth_stencil: None,
                     multisample: triangle::multisample_state(antialiasing),
                     multiview_mask: None,
-                    cache: None,
+                    cache,
                 },
             );
 

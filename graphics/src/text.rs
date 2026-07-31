@@ -2,6 +2,7 @@
 pub mod cache;
 pub mod editor;
 pub mod paragraph;
+pub mod system_fonts;
 
 pub use cache::Cache;
 pub use editor::Editor;
@@ -132,8 +133,11 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
     static FONT_SYSTEM: OnceLock<RwLock<FontSystem>> = OnceLock::new();
 
     FONT_SYSTEM.get_or_init(|| {
+        // WMDE: system_fonts::font_system replaces cosmic_text::FontSystem::new_with_fonts.
+        // Same result, same defaults, same locale - it only parses the installed fonts on
+        // every core instead of one. That scan is the most expensive single step of start-up.
         RwLock::new(FontSystem {
-            raw: cosmic_text::FontSystem::new_with_fonts([
+            raw: system_fonts::font_system([
                 cosmic_text::fontdb::Source::Binary(Arc::new(
                     include_bytes!("../fonts/Iced-Icons.ttf").as_slice(),
                 )),
@@ -146,6 +150,23 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
             version: Version::default(),
         })
     })
+}
+
+/// Starts building the [`FontSystem`] on a background thread.
+///
+/// Scanning the installed fonts does not depend on anything else the application does at
+/// start-up, but it happens lazily on the first piece of text, which is well after the
+/// window and the GPU device exist. Kicking it off first lets it run alongside Vulkan
+/// initialisation instead of after it.
+///
+/// Calling this is optional and safe to repeat: [`font_system`] is a `OnceLock`, so whoever
+/// gets there first does the work and everyone else waits for that same result.
+pub fn prewarm_font_system() {
+    let _ = std::thread::Builder::new()
+        .name("iced-font-scan".to_owned())
+        .spawn(|| {
+            let _ = font_system().read();
+        });
 }
 
 /// A set of system fonts.
