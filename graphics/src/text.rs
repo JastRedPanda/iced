@@ -151,9 +151,12 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
 /// Starts building the [`FontSystem`] on a background thread.
 ///
 /// Scanning the installed fonts does not depend on anything else the application does at
-/// start-up, but it happens lazily on the first piece of text, which is well after the
-/// window and the GPU device exist. Kicking it off first lets it run alongside Vulkan
-/// initialisation instead of after it.
+/// start-up, so starting it on a thread lets it overlap with whatever the caller does next.
+///
+/// The overlap is only with that, though: libcosmic joins the scan before it builds the
+/// window, because `preload_fonts` takes the write lock as the first statement of
+/// `iced_settings`. So the scan does **not** run alongside Vulkan initialisation, and the
+/// gain is bounded by how much work stands between the call and `run`.
 ///
 /// Calling this is optional and safe to repeat: [`font_system`] is a `OnceLock`, so whoever
 /// gets there first does the work and everyone else waits for that same result.
