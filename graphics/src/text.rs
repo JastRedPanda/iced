@@ -148,6 +148,27 @@ pub fn font_system() -> &'static RwLock<FontSystem> {
     })
 }
 
+/// Starts building the [`FontSystem`] on a background thread.
+///
+/// Scanning the installed fonts does not depend on anything else the application does at
+/// start-up, but it happens lazily on the first piece of text, which is well after the
+/// window and the GPU device exist. Kicking it off first lets it run alongside Vulkan
+/// initialisation instead of after it.
+///
+/// Calling this is optional and safe to repeat: [`font_system`] is a `OnceLock`, so whoever
+/// gets there first does the work and everyone else waits for that same result.
+pub fn prewarm_font_system() {
+    let _ = std::thread::Builder::new()
+        .name("iced-font-scan".to_owned())
+        .spawn(|| {
+            // Taking the lock is the whole point: the `OnceLock` initialiser runs on first
+            // access, and this thread exists only to be the one that pays for it. Dropped
+            // straight away on purpose - `let _` on a guard is denied by let_underscore_lock,
+            // and it would read as an accident here rather than the intent.
+            drop(font_system().read());
+        });
+}
+
 /// A set of system fonts.
 pub struct FontSystem {
     raw: cosmic_text::FontSystem,

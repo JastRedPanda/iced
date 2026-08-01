@@ -413,12 +413,11 @@ impl Compositor {
         });
 
         // Request SHADER_F16 only if the adapter supports it (e.g., not available in WebGL2)
-        let required_features =
-            if adapter.features().contains(wgpu::Features::SHADER_F16) {
-                wgpu::Features::SHADER_F16
-            } else {
-                wgpu::Features::empty()
-            };
+        // WMDE: PIPELINE_CACHE the same way - Vulkan-only, and asking for a feature the
+        // adapter lacks fails the whole device request. Without it pipeline_cache::load
+        // returns None and pipelines are built uncached, as before.
+        let optional = wgpu::Features::SHADER_F16 | wgpu::Features::PIPELINE_CACHE;
+        let required_features = adapter.features() & optional;
 
         let mut errors = Vec::new();
 

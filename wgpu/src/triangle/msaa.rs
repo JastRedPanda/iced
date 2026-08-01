@@ -20,6 +20,7 @@ impl Pipeline {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         antialiasing: graphics::Antialiasing,
+        cache: Option<&wgpu::PipelineCache>,
     ) -> Pipeline {
         let sampler =
             device.create_sampler(&wgpu::SamplerDescriptor::default());
@@ -117,7 +118,7 @@ impl Pipeline {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache,
             });
 
         Self {

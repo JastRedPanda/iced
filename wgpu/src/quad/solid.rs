@@ -61,6 +61,7 @@ impl Pipeline {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         constants_layout: &wgpu::BindGroupLayout,
+        cache: Option<&wgpu::PipelineCache>,
     ) -> Self {
         let layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -140,7 +141,7 @@ impl Pipeline {
                     alpha_to_coverage_enabled: false,
                 },
                 multiview_mask: None,
-                cache: None,
+                cache,
             });
 
         Self { pipeline }

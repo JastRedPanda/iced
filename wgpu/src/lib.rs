@@ -33,6 +33,7 @@ pub mod geometry;
 mod buffer;
 mod color;
 mod engine;
+mod pipeline_cache;
 mod quad;
 mod text;
 mod triangle;
@@ -1003,7 +1004,10 @@ impl renderer::Headless for Renderer {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("iced_wgpu [headless]"),
-                required_features: wgpu::Features::empty(),
+                // WMDE: take the pipeline cache here too when the adapter offers it. This
+                // path builds the very same Engine, so it pays the same pipeline cost.
+                required_features: adapter.features()
+                    & wgpu::Features::PIPELINE_CACHE,
                 required_limits: wgpu::Limits {
                     max_bind_groups: 2,
                     ..wgpu::Limits::default()
