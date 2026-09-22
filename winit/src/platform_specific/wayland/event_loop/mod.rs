@@ -1,4 +1,5 @@
 pub mod control_flow;
+pub mod popup;
 pub mod proxy;
 pub mod state;
 
@@ -6,6 +7,7 @@ pub mod state;
 use crate::platform_specific::SurfaceIdWrapper;
 use crate::{
     Control,
+    event_loop::popup::PopupManager,
     futures::futures::channel::mpsc,
     handlers::{
         ext_background_effect, overlap::OverlapNotifyV1,
@@ -177,11 +179,39 @@ impl SctkEventLoop {
                                 }
                             }
                             crate::platform_specific::Action::SetCursor(
+                                surface,
                                 icon,
                             ) => {
-                                if let Some(seat) = state.seats.get_mut(0) {
+                                state.record_cursor(surface.clone(), |r| {
+                                    r.icon = Some(icon);
+                                    r.hidden = false;
+                                });
+                                if let Some(seat) = state
+                                    .seats
+                                    .get_mut(0)
+                                    .filter(|s| s.is_over(&surface))
+                                {
                                     seat.icon = Some(icon);
+                                    seat.hidden = false;
                                     seat.set_cursor(&state.connection, icon);
+                                }
+                            }
+                            crate::platform_specific::Action::SetCursorVisible(
+                                surface,
+                                visible,
+                            ) => {
+                                state.record_cursor(surface.clone(), |r| {
+                                    r.hidden = !visible;
+                                });
+                                if let Some(seat) = state
+                                    .seats
+                                    .get_mut(0)
+                                    .filter(|s| s.is_over(&surface))
+                                {
+                                    seat.set_cursor_visible(
+                                        &state.connection,
+                                        visible,
+                                    );
                                 }
                             }
                             crate::platform_specific::Action::RequestRedraw(
@@ -377,12 +407,13 @@ impl SctkEventLoop {
                         blur_surfaces: HashMap::new(),
                         corner_radii: HashMap::new(),
                         layer_surfaces: Vec::new(),
-                        popups: Vec::new(),
+                        popmgr: PopupManager::default(),
                         lock_surfaces: Vec::new(),
                         subsurfaces: Vec::new(),
                         touch_points: HashMap::new(),
                         sctk_events: Vec::new(),
                         frame_status: HashMap::new(),
+                        cursor_requests: HashMap::new(),
                         fractional_scaling_manager,
                         viewporter_state,
                         compositor_updates: Default::default(),
@@ -514,8 +545,8 @@ impl SctkEventLoop {
                             .chain(
                                 state
                                     .state
-                                    .popups
-                                    .iter()
+                                    .popmgr
+                                    .popups()
                                     .map(|s| s.popup.wl_surface()),
                             )
                             .chain(
