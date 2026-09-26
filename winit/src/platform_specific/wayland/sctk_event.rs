@@ -155,6 +155,9 @@ pub enum SctkEvent {
         parent_id: WlSurface,
         /// the id of this popup
         id: WlSurface,
+        /// Window id of the parent surface, as passed in the popup settings. Needed to route
+        /// `Done` to the parent's widgets.
+        parent_window: SurfaceId,
     },
 
     SubsurfaceEvent(SubsurfaceEventVariant),
@@ -195,6 +198,10 @@ pub enum SctkEvent {
     SessionUnlocked,
     SurfaceScaleFactorChanged(f64, WlSurface, window::Id),
     Winit(WindowId, WindowEvent),
+    PopupModifiers {
+        toplevel: window::Id,
+        modifiers: cctk::sctk::seat::keyboard::Modifiers,
+    },
     Subcompositor(SubsurfaceState),
     ShortcutsInhibited(bool),
 }
@@ -620,7 +627,12 @@ impl SctkEvent {
                             keyboard::Event::KeyPressed {
                                 key: key.clone(),
                                 location: location,
-                                text: ke.utf8.map(|s| s.into()),
+                                // sctk reports keys without a text representation (e.g. arrows, Home) as
+                                // Some("") but winit reports None. Widgets are written against winit's contract.
+                                text: ke
+                                    .utf8
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.into()),
                                 modifiers: modifiers_to_native(*modifiers),
                                 physical_key,
                                 repeat: false,
@@ -646,7 +658,9 @@ impl SctkEvent {
                             keyboard::Event::KeyPressed {
                                 key: key.clone(),
                                 location: location,
-                                text: utf8.map(|s| s.into()),
+                                text: utf8
+                                    .filter(|s| !s.is_empty())
+                                    .map(|s| s.into()),
                                 modifiers: modifiers_to_native(*modifiers),
                                 physical_key,
                                 repeat: true,
@@ -920,6 +934,7 @@ impl SctkEvent {
             SctkEvent::PopupEvent {
                 variant,
                 id: surface,
+                parent_window,
                 ..
             } => {
                 match variant {
@@ -958,6 +973,8 @@ impl SctkEvent {
                                 )
                             })
                         {
+                            // tell the parent's widgets so menus can reset when the compositor dismisses them.
+                            events.push((Some(parent_window), e.1.clone()));
                             events.push(e)
                         }
                     }
@@ -1394,6 +1411,19 @@ impl SctkEvent {
                 ),
             )),
             SctkEvent::Winit(_, _) => {}
+            SctkEvent::PopupModifiers {
+                toplevel,
+                modifiers,
+            } => {
+                events.push((
+                    Some(toplevel),
+                    iced_runtime::core::Event::Keyboard(
+                        keyboard::Event::ModifiersChanged(modifiers_to_native(
+                            modifiers,
+                        )),
+                    ),
+                ));
+            }
             SctkEvent::SurfaceScaleFactorChanged(scale, _, id) => {
                 if let Some(w) = window_manager.get_mut(id) {
                     w.state.update_scale_factor(scale);

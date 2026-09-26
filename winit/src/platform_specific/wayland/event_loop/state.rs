@@ -44,6 +44,7 @@ use cctk::{
     cosmic_protocols::{
         corner_radius::v1::client::cosmic_corner_radius_manager_v1::CosmicCornerRadiusManagerV1,
         overlap_notify::v1::client::zcosmic_overlap_notification_v1::ZcosmicOverlapNotificationV1,
+        session_lock_layer::v1::client::cosmic_session_lock_layer_manager_v1::CosmicSessionLockLayerManagerV1,
     },
     sctk::{
         activation::{ActivationState, RequestData},
@@ -333,6 +334,7 @@ pub struct SctkSubsurface {
 pub struct SctkPopupData {
     pub(crate) id: core::window::Id,
     pub(crate) parent: PopupParent,
+    pub(crate) parent_window: core::window::Id,
     pub(crate) toplevel: WlSurface,
     pub(crate) positioner: Arc<XdgPositioner>,
     pub(crate) grab: bool,
@@ -433,6 +435,9 @@ pub struct SctkState {
     pub(crate) blur_surfaces: HashMap<core::window::Id, ExtBackgroundEffectSurfaceV1>,
     pub(crate) corner_radii: HashMap<core::window::Id, (SctkCornerRadius, Option<CornerRadius>)>,
     pub(crate) touch_points: HashMap<touch::Finger, (WlSurface, Point)>,
+    /// List of layer surfaces whose keyboard leave was ignored because focus moved
+    /// to one of their own grabbing popups. Their next enter is swallowed too.
+    pub(crate) kbd_leave_to_own_popup: HashSet<ObjectId>,
 
     /// Window updates, which are coming from SCTK or the compositor, which require
     /// calling back to the sctk's downstream. They are handled right in the event loop,
@@ -476,6 +481,7 @@ pub struct SctkState {
     pub(crate) toplevel_manager: Option<ToplevelManagerState>,
     pub(crate) subsurface_state: Option<SubsurfaceState>,
     pub(crate) ext_background_effect_manager: Option<ext_background_effect::ExtBackgroundEffectManager>,
+    pub(crate) cosmic_session_lock_layer_manager: Option<CosmicSessionLockLayerManagerV1>,
 
     pub(crate) activation_token_ctr: u32,
     pub(crate) token_senders: HashMap<u32, oneshot::Sender<Option<String>>>,
@@ -678,6 +684,33 @@ impl SctkState {
         // TODO winit sets cursor size after handling the change for the window, so maybe that should be done as well.
     }
 
+    /// Popups can only be attached to xdg or layer surfaces. So for subsurfaces, we return the
+    /// parent, and adjust the offset.
+    pub(crate) fn subsurface_popup_parent(
+        &self,
+        id: core::window::Id,
+    ) -> Option<(WlSurface, (i32, i32))> {
+        let mut sub = self.subsurfaces.iter().find(|s| s.id == id)?;
+        let mut offset = (0, 0);
+        // bounded by the number of subsurfaces so a corrupt chain cannot spin forever
+        for _ in 0..=self.subsurfaces.len() {
+            if let Some(b) = sub.instance.bounds {
+                offset.0 += b.x as i32;
+                offset.1 += b.y as i32;
+            }
+            let parent = &sub.instance.parent;
+            match self
+                .subsurfaces
+                .iter()
+                .find(|s| s.instance.wl_surface == *parent)
+            {
+                Some(s) => sub = s,
+                None => return Some((parent.clone(), offset)),
+            }
+        }
+        None
+    }
+
     pub fn get_popup(
         &mut self,
         settings: SctkPopupSettings,
@@ -722,6 +755,27 @@ impl SctkState {
                 PopupParent::Popup(parent.popup.wl_surface().clone()),
                 parent.data.toplevel.clone(),
             )
+        } else if let Some((surface, _)) =
+            self.subsurface_popup_parent(settings.parent)
+        {
+            if self
+                .layer_surfaces
+                .iter()
+                .any(|l| *l.surface.wl_surface() == surface)
+            {
+                (PopupParent::LayerSurface(surface.clone()), surface)
+            } else if self
+                .windows
+                .iter()
+                .any(|w| w.wl_surface(&self.connection) == surface)
+            {
+                (PopupParent::Window(surface.clone()), surface)
+            } else if let Some(p) = self.popmgr.popup(&surface) {
+                (PopupParent::Popup(surface), p.data.toplevel.clone())
+            } else {
+                // e.g. a session lock surface, which cannot parent xdg popups
+                return Err(PopupCreationError::ParentMissing);
+            }
         } else {
             return Err(PopupCreationError::ParentMissing);
         };
@@ -902,6 +956,7 @@ impl SctkState {
             data: SctkPopupData {
                 id: settings.id,
                 parent: parent.clone(),
+                parent_window: settings.parent,
                 toplevel: toplevel.clone(),
                 positioner: positioner.clone(),
                 grab: settings.grab,
@@ -1154,6 +1209,7 @@ impl SctkState {
                             }
                             if let Some(i) = self.layer_surfaces.iter().position(|l| l.id == id) {
                                 let l = self.layer_surfaces.remove(i);
+                                _ = self.kbd_leave_to_own_popup.remove(&l.surface.wl_surface().id());
 
                                 if let Some(blurred) = self.blur_surfaces.remove(&l.id) {
                                     blurred.destroy();
@@ -1264,16 +1320,36 @@ impl SctkState {
                                 }
                             }
                         },
+                        platform_specific::wayland::layer_surface::Action::ShowOnLock { id, value } => {
+                            if let Some(layer_surface) = self.layer_surfaces.iter_mut().find(|l| l.id == id) {
+                                if let SurfaceKind::Wlr(wlr) = layer_surface.surface.kind() {
+                                    if let Some(manager) = &self.cosmic_session_lock_layer_manager {
+                                        if value {
+                                            manager.set_show_on_lock(wlr);
+                                        } else {
+                                            manager.unset_show_on_lock(wlr);
+                                        }
+                                        _ = self.to_commit.insert(id, layer_surface.surface.wl_surface().clone());
+                                    }
+                                }
+                            }
+                        }
                 },
             Action::Popup(action) => {
                 match action {
-                    platform_specific::wayland::popup::Action::Popup { popup: settings } => {
+                    platform_specific::wayland::popup::Action::Popup { popup: mut settings } => {
+                        // anchor rects from widgets inside a subsurface are in that subsurface's coordinates
+                        if let Some((_, (dx, dy))) = self.subsurface_popup_parent(settings.parent) {
+                            settings.positioner.anchor_rect.x += dx;
+                            settings.positioner.anchor_rect.y += dy;
+                        }
                         // first check existing popup
                         // if an existing popup with the same id exists, we just update the positioner.
                         if let Some((chain, existing)) = self.popmgr.popup_id(settings.id).and_then(|p|
                                 (p.data.grab == settings.grab && self.popmgr.popups().any(|parent| parent.popup.wl_surface() == p.data.parent.wl_surface() && parent.data.id == settings.parent)
                                 || self.windows.iter().any(|w| w.id == settings.parent && *p.data.parent.wl_surface() == w.wl_surface(&self.connection))
-                                || self.layer_surfaces.iter().any(|l| l.id == settings.parent && p.data.parent.wl_surface() == l.surface.wl_surface())).then(||
+                                || self.layer_surfaces.iter().any(|l| l.id == settings.parent && p.data.parent.wl_surface() == l.surface.wl_surface())
+                                || (p.data.parent_window == settings.parent && self.subsurfaces.iter().any(|s| s.id == settings.parent))).then(||
                             {
                                 p.popup.wl_surface().clone()
                             })).and_then(|s| self.popmgr.chain_for_popup_mut(&s))
@@ -1314,7 +1390,7 @@ impl SctkState {
                             existing.data.positioner = Arc::new(positioner);
                             existing.set_size(size.0, size.1, TOKEN_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                             _ = send_event(&self.events_sender, &self.proxy,
-                                SctkEvent::PopupEvent { variant: crate::sctk_event::PopupEventVariant::Size(size.0, size.1), toplevel_id: existing.data.parent.wl_surface().clone(), parent_id: existing.data.parent.wl_surface().clone(), id: existing.popup.wl_surface().clone() });
+                                SctkEvent::PopupEvent { variant: crate::sctk_event::PopupEventVariant::Size(size.0, size.1), toplevel_id: existing.data.parent.wl_surface().clone(), parent_id: existing.data.parent.wl_surface().clone(), id: existing.popup.wl_surface().clone(), parent_window: existing.data.parent_window });
                             return Ok(());
                         } else if !self.destroyed.is_empty() || self.popmgr.popup_id(settings.id).is_some() || self.popmgr.active_grab().is_some()
                         {
@@ -1362,6 +1438,7 @@ impl SctkState {
                                             TimeoutAction::Drop
                                         }
                                     } else {
+                                        let parent_window = settings.parent;
                                         match state.get_popup(settings) {
                                             Ok((id, parent_id, toplevel_id, surface, common)) => {
                                                 let wl_surface = surface.wl_surface().clone();
@@ -1369,7 +1446,7 @@ impl SctkState {
                                                 send_event(&state.events_sender, &state.proxy,
                                                     SctkEvent::PopupEvent {
                                                         variant: crate::platform_specific::wayland::sctk_event::PopupEventVariant::Created(queue_handle.clone(), surface, id, common, state.connection.display()),
-                                                        toplevel_id, parent_id, id: wl_surface });
+                                                        toplevel_id, parent_id, id: wl_surface, parent_window });
                                             }
                                             Err(err) => {
                                                 log::error!("Failed to create popup. {err:?}");
@@ -1380,6 +1457,7 @@ impl SctkState {
                                 });
                             }
                         } else {
+                            let parent_window = settings.parent;
                             match self.get_popup(settings) {
                                 Ok((id, parent_id, toplevel_id, surface, common)) => {
                                     let wl_surface = surface.wl_surface().clone();
@@ -1388,7 +1466,7 @@ impl SctkState {
                                             variant: crate::platform_specific::wayland::sctk_event::PopupEventVariant::Created(
                                                 self.queue_handle.clone(), surface, id, common, self.connection.display()
                                             ),
-                                            toplevel_id, parent_id, id: wl_surface }
+                                            toplevel_id, parent_id, id: wl_surface, parent_window }
                                     );
                                 }
                                 Err(err) => {
@@ -1413,7 +1491,7 @@ impl SctkState {
                             sctk_popup.set_size(width, height, TOKEN_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                             let surface = sctk_popup.popup.wl_surface().clone();
                             _ = send_event(&self.events_sender, &self.proxy,
-                                SctkEvent::PopupEvent { variant: crate::sctk_event::PopupEventVariant::Size(width, height), toplevel_id: sctk_popup.data.parent.wl_surface().clone(), parent_id: sctk_popup.data.parent.wl_surface().clone(), id: surface });
+                                SctkEvent::PopupEvent { variant: crate::sctk_event::PopupEventVariant::Size(width, height), toplevel_id: sctk_popup.data.parent.wl_surface().clone(), parent_id: sctk_popup.data.parent.wl_surface().clone(), id: surface, parent_window: sctk_popup.data.parent_window });
                         }
                     },
                     platform_specific::wayland::popup::Action::Reposition { id, positioner } => {
@@ -1453,7 +1531,7 @@ impl SctkState {
                             sctk_popup.data.positioner.set_size(w as i32, h as i32);
                             sctk_popup.popup.reposition(&sctk_popup.data.positioner, TOKEN_CTR.fetch_add(1, std::sync::atomic::Ordering::Relaxed));                        let surface = sctk_popup.popup.wl_surface().clone();
                             _ = send_event(&self.events_sender, &self.proxy,
-                                SctkEvent::PopupEvent { variant: crate::sctk_event::PopupEventVariant::Size(size.0, size.1), toplevel_id: sctk_popup.data.parent.wl_surface().clone(), parent_id: sctk_popup.data.parent.wl_surface().clone(), id: surface });
+                                SctkEvent::PopupEvent { variant: crate::sctk_event::PopupEventVariant::Size(size.0, size.1), toplevel_id: sctk_popup.data.parent.wl_surface().clone(), parent_id: sctk_popup.data.parent.wl_surface().clone(), id: surface, parent_window: sctk_popup.data.parent_window });
                         }
                     },
                 }
@@ -1642,9 +1720,13 @@ impl SctkState {
                     }
                 },
                 subsurface::Action::Reposition { id, x, y } => {
-                    if let Some(subsurface) = self.subsurfaces.iter().find(|s| s.id == id) {
+                    if let Some(subsurface) = self.subsurfaces.iter_mut().find(|s| s.id == id) {
                         subsurface.instance.wl_subsurface.set_position(x, y);
                         subsurface.instance.wl_surface.commit();
+                        if let Some(b) = subsurface.instance.bounds.as_mut() {
+                            b.x = x as f32;
+                            b.y = y as f32;
+                        }
                     }
                 },
             },
@@ -1852,6 +1934,7 @@ impl SctkState {
                 &self.proxy,
                 SctkEvent::PopupEvent {
                     variant: crate::sctk_event::PopupEventVariant::Done,
+                    parent_window: popup.data.parent_window,
                     toplevel_id: popup.data.toplevel.clone(),
                     parent_id: popup.data.parent.wl_surface().clone(),
                     id: popup.popup.wl_surface().clone(),
@@ -2160,3 +2243,4 @@ pub(crate) fn send_event(
 
 delegate_noop!(SctkState: ignore WlSubsurface);
 delegate_noop!(SctkState: ignore WlRegion);
+delegate_noop!(SctkState: CosmicSessionLockLayerManagerV1);

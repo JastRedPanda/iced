@@ -224,6 +224,7 @@ pub struct State<P: Paragraph> {
     focused: bool,
     keyboard_focused: bool,
     context_menu_position: Option<Point>,
+    clipboard_has_text: bool,
 }
 
 impl<P: Paragraph> Default for State<P> {
@@ -234,6 +235,7 @@ impl<P: Paragraph> Default for State<P> {
             focused: false,
             keyboard_focused: false,
             context_menu_position: None,
+            clipboard_has_text: false,
         }
     }
 }
@@ -377,45 +379,65 @@ where
         let style = theme.style(&self.class);
         let bounds = layout.bounds();
         let paragraph = state.paragraph.raw();
-        if let Some(sel) = &state.selection {
-            let left = sel.anchor.min(sel.end);
-            let right = sel.anchor.max(sel.end);
-            let content: &str = self.fragment.as_ref();
+        let anchor = bounds.anchor(
+            paragraph.min_bounds(),
+            paragraph.align_x(),
+            paragraph.align_y(),
+        );
 
-            if left != right {
-                let lo_byte = grapheme_to_byte(content, left);
-                let hi_byte = grapheme_to_byte(content, right);
+        let rects: Vec<Rectangle> = state
+            .selection
+            .as_ref()
+            .filter(|sel| sel.anchor != sel.end)
+            .map(|sel| {
+                let content: &str = self.fragment.as_ref();
+                let lo_byte =
+                    grapheme_to_byte(content, sel.anchor.min(sel.end));
+                let hi_byte =
+                    grapheme_to_byte(content, sel.anchor.max(sel.end));
 
-                let anchor = bounds.anchor(
-                    paragraph.min_bounds(),
-                    paragraph.align_x(),
-                    paragraph.align_y(),
+                paragraph
+                    .highlight(
+                        0,
+                        (lo_byte, text::Affinity::After),
+                        (hi_byte, text::Affinity::Before),
+                    )
+                    .into_iter()
+                    .map(|r| Rectangle {
+                        x: anchor.x + r.x,
+                        y: anchor.y + r.y,
+                        width: r.width,
+                        height: r.height,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let fill_selection = |renderer: &mut Renderer| {
+            for r in &rects {
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds: *r,
+                        ..renderer::Quad::default()
+                    },
+                    style.selected_fill,
                 );
+            }
+        };
 
-                let rects = paragraph.highlight(
-                    0,
-                    (lo_byte, text::Affinity::After),
-                    (hi_byte, text::Affinity::Before),
-                );
-
-                for r in rects {
-                    renderer.fill_quad(
-                        renderer::Quad {
-                            bounds: Rectangle {
-                                x: anchor.x + r.x,
-                                y: anchor.y + r.y,
-                                width: r.width,
-                                height: r.height,
-                            },
-                            ..renderer::Quad::default()
-                        },
-                        style.selected_fill,
-                    );
-                }
+        if style.selected_text_color.is_none() {
+            fill_selection(renderer);
+        }
+        draw(renderer, defaults, bounds, paragraph, style, viewport);
+        if let Some(color) = style.selected_text_color {
+            fill_selection(renderer);
+            for r in &rects {
+                renderer.with_layer(*r, |renderer| {
+                    renderer
+                        .fill_paragraph(paragraph, anchor, color, *viewport);
+                });
             }
         }
-
-        draw(renderer, defaults, bounds, paragraph, style, viewport);
     }
 
     fn update(
@@ -529,6 +551,7 @@ where
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
                 if let Some(pos) = cursor.position_over(bounds) {
                     state.context_menu_position = Some(pos);
+                    state.clipboard_has_text = clipboard_has_text(clipboard);
                     state.focused = true;
                     state.keyboard_focused = false;
                     shell.capture_event();
@@ -928,6 +951,10 @@ pub struct Style {
     pub color: Option<Color>,
     /// The fill [`Color`] of the selection highlight.
     pub selected_fill: Color,
+    /// The [`Color`] of selected text.
+    ///
+    /// The default, `None`, keeps the regular text color.
+    pub selected_text_color: Option<Color>,
 }
 
 impl Default for Style {
@@ -935,6 +962,7 @@ impl Default for Style {
         Self {
             color: None,
             selected_fill: DEFAULT_SELECTION_COLOR,
+            selected_text_color: None,
         }
     }
 }
@@ -1023,6 +1051,13 @@ pub fn danger(theme: &Theme) -> Style {
 
 use crate::widget::tree::Tree as WidgetTree;
 
+/// Returns `true` if the clipboard currently holds non-empty text.
+pub fn clipboard_has_text(clipboard: &dyn Clipboard) -> bool {
+    clipboard
+        .read(crate::clipboard::Kind::Standard)
+        .is_some_and(|s| !s.is_empty())
+}
+
 /// Implement this on a **widget** to enable context menu support for
 /// text selection (Copy, Select All, and optionally Cut / Paste) in libcosmic
 pub trait HasSelectableText {
@@ -1032,9 +1067,21 @@ pub trait HasSelectableText {
     /// Selects all text.
     fn select_all(&self, tree: &mut WidgetTree);
 
-    /// Returns `true` if the widget is editable (enables Cut / Paste).
+    /// Returns `true` if the widget is editable (shows Cut / Paste).
     fn is_editable(&self) -> bool {
         false
+    }
+
+    /// Returns `true` if the widget has any text (enables Select All).
+    fn has_text(&self, _tree: &WidgetTree) -> bool {
+        true
+    }
+
+    /// Returns whether the clipboard held text when the context menu was
+    /// requested (enables Paste). Widgets cache this on right-click because
+    /// overlays have no clipboard access.
+    fn clipboard_has_text(&self, _tree: &WidgetTree) -> bool {
+        true
     }
 
     /// Returns `true` if the widget is currently focused.
@@ -1104,6 +1151,16 @@ impl<Theme: Catalog, Renderer: text::Renderer> HasSelectableText
             .get_or_insert_with(|| Box::new(SelectionState::default()));
         sel.anchor = 0;
         sel.end = count;
+    }
+
+    fn has_text(&self, tree: &WidgetTree) -> bool {
+        let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
+        !state.paragraph.content().is_empty()
+    }
+
+    fn clipboard_has_text(&self, tree: &WidgetTree) -> bool {
+        let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
+        state.clipboard_has_text
     }
 
     fn is_focused(&self, tree: &WidgetTree) -> bool {
