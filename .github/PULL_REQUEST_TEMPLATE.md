@@ -1,3 +1,10 @@
-The core team is busy and does not have time to mentor nor babysit new contributors. If a member of the core team thinks that reviewing and understanding your work will take more time and effort than writing it from scratch by themselves, your contribution will be dismissed. It is your responsibility to communicate and figure out how to reduce the likelihood of this!
+Replace this text with a description of your changes, and why these changes are important. Read and acknowledge the list below. PRs without a completed checkbox will be closed.
 
-Read the contributing guidelines for more details: https://github.com/iced-rs/iced/blob/master/CONTRIBUTING.md
+---
+
+- I have not included any LLM (also known as AI) generated content in this PR, including code, comments, and descriptions.
+- I understand these changes in full and will be able to respond to review comments.
+- My change is accurately described in the commit message.
+- My contribution is tested and working as described.
+- I have read the [Developer Certificate of Origin](https://developercertificate.org/) and certify my contribution under its conditions.
+- [ ] I have read and followed all of the above requirements. For more information, see our [contributor guide](https://github.com/pop-os/pop/blob/master/CONTRIBUTING.md).
